@@ -916,6 +916,14 @@ const P_SETEXT = /^ {0,3}(=+|-+)[ \t]*$/;
 const P_TABLE_DELIM = /^ {0,3}((?:\| *)?:?-+:? *(?:\| *:?-+:? *)*(?:\| *)?)$/;
 const P_BLANK = /^[ \t]*$/;
 const P_TABLE_HEADER = /^ *[^ ]/;
+// A line that is a single `<...>` tag ending at EOL: the narrow HTML
+// lookahead marked's setext-heading regex uses (unlike the paragraph
+// regex's broad HTML lookahead above). Such a line kills a setext heading
+// AND interrupts a paragraph; a broad-HTML line that is not narrow (e.g.
+// `<!-- c --> <div>`) interrupts the paragraph but a setext heading may
+// still span it, so the paragraph break is deferred until the heading
+// question is settled.
+const P_HTML_NARROW = /^ {0,3}<[^>]+>$/;
 
 // Scan a paragraph-like block starting at src[0] line by line, returning
 // a table token (header + delimiter on the first two lines), a setext
@@ -962,6 +970,10 @@ function paraScan(src, top) {
     // into the paragraph scan below.
   }
   let end = 1;
+  // If >= 0, the paragraph already broke before this line (broad-HTML
+  // line that is not a narrow HTML line); the scan continues only to
+  // settle whether a setext heading spans that line.
+  let paraEnd = -1;
   for (let i = 1; ; i++) {
     const ln = line(i);
     // A whitespace-only line ends the paragraph only when a newline
@@ -981,7 +993,13 @@ function paraScan(src, top) {
       // Fall through to the interrupt tests below.
     }
     if (RX_HR.test(ln) || P_INT_HEADING.test(ln) || P_INT_BQ.test(ln) || P_INT_FENCE.test(ln) ||
-        P_INT_LIST.test(ln) || htmlBeginRx(4).test(ln)) break;
+        P_INT_LIST.test(ln)) break;
+    if (htmlBeginRx(4).test(ln)) {
+      if (P_HTML_NARROW.test(ln)) break;
+      if (paraEnd < 0) paraEnd = i;
+      end = i + 1;
+      continue;
+    }
     const nx = line(i + 1);
     if (nx !== null && P_TABLE_HEADER.test(ln) && P_TABLE_DELIM.test(nx)) {
       // A table interrupts the paragraph — unless the delimiter line is
@@ -1000,7 +1018,8 @@ function paraScan(src, top) {
     end = i + 1;
   }
   if (!top) return null;
-  const text = lines.slice(0, end).join('\n');
+  const pe = paraEnd >= 0 ? paraEnd : end;
+  const text = lines.slice(0, pe).join('\n');
   return { tok: { t: 'paragraph', raw: text, text, q: queueInline(text) }, len: text.length };
 }
 
