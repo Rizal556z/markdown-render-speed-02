@@ -1086,39 +1086,170 @@ function linkInText(S, text) {
 
 // Mask links, code, html and escapes so emStrong and del do not see their
 // delimiters inside them. Every mask keeps the length it replaces.
-function maskSrc(S, src) {
-  let maskedSrc = src;
-  if (src.includes('[') && src.includes(']')) {
-    const maskReflink = (match0) => {
-      const refStart = match0.lastIndexOf('[');
-      if (!Object.hasOwn(S.links, normalizeLabel(match0.slice(refStart + 1, -1)))) return match0;
-      if (refStart > 1 && match0.charAt(0) !== '!') {
-        const text = match0.slice(1, refStart - 1);
-        if (linkInText(S, text)) {
-          return '[' + text.replace(reflinkSearchRe, maskReflink) + '][' + 'a'.repeat(match0.length - refStart - 2) + ']';
+// This mirrors marked's three .replace() scans, in the same order, but as
+// three cheap manual walks instead of global regex scans: each walk jumps
+// between trigger characters with a native regex and tries the span regexes
+// anchored there, so they never scan plain text.
+//  - pass A (reflinks): a defined reflink/nolink is masked to '[aaa...]'
+//    (or, when its text holds a link, the text stays visible and only the
+//    inner links and the ref are masked). The walk advances past every
+//    match, defined or not, exactly like a global replace.
+//  - pass B (escapes and code spans): an escape becomes '+'s (punctuation,
+//    so flanking is preserved); a code span keeps its backticks but its
+//    inner backticks become '+'. A failed code span consumes the whole
+//    backtick run, so a later backtick in the run can never start one.
+//  - pass C (links, code spans, html tags): each becomes '[aaa...]'. A
+//    code span here must not be preceded by a backtick (the block-skip
+//    pass's (?<!`) lookbehind). Running B before C matters: normalising a
+//    code span's inner backtick is what lets a link label containing it
+//    match at all.
+const PUNCT_1 = /[\p{P}\p{S}]/u;
+const NEXT_A = /[![]/g;
+const NEXT_B = /[\\`]/g;
+const NEXT_C = /[`\[<]/g;
+const BS_LINK_STICKY = /\[(?:[^\[\]`]|(?<a>`+)[^`]+\k<a>(?!`))*?\]\((?:\\[\s\S]|[^\\\(\)]|\((?:\\[\s\S]|[^\\\(\)])*\))*\)/y;
+const BS_HTML_STICKY = /<(?! )[^<>]*?>/y;
+const REFLINK_STICKY = new RegExp(reflinkSearchRe.source, 'y');
+const CODE_STICKY = sticky(inlineCodeRe);
+
+function maskReflink(S, match0) {
+  const refStart = match0.lastIndexOf('[');
+  if (!Object.hasOwn(S.links, normalizeLabel(match0.slice(refStart + 1, -1)))) return match0;
+  if (refStart > 1 && match0.charAt(0) !== '!') {
+    const text = match0.slice(1, refStart - 1);
+    if (linkInText(S, text)) {
+      return '[' + text.replace(reflinkSearchRe, (m) => maskReflink(S, m)) + '][' + 'a'.repeat(match0.length - refStart - 2) + ']';
+    }
+  }
+  return '[' + 'a'.repeat(match0.length - 2) + ']';
+}
+
+function maskReflinks(S, src) {
+  const len = src.length;
+  let out = null;
+  let chunkStart = 0;
+  NEXT_A.lastIndex = 0;
+  let m;
+  while ((m = NEXT_A.exec(src)) !== null) {
+    const j = m.index;
+    const cap = execAt(REFLINK_STICKY, src, j);
+    if (!cap) continue;
+    const masked = maskReflink(S, cap[0]);
+    const end = j + cap[0].length;
+    if (masked !== cap[0]) {
+      if (out === null) out = [];
+      if (j > chunkStart) out.push(src.slice(chunkStart, j));
+      out.push(masked);
+      chunkStart = end;
+    }
+    NEXT_A.lastIndex = end;
+  }
+  if (out === null) return src;
+  if (len > chunkStart) out.push(src.slice(chunkStart, len));
+  return out.join('');
+}
+
+function normalizeCodeEscapes(src) {
+  const len = src.length;
+  let out = null;
+  let chunkStart = 0;
+  NEXT_B.lastIndex = 0;
+  let m;
+  while ((m = NEXT_B.exec(src)) !== null) {
+    const j = m.index;
+    if (src[j] === '\\') {
+      // An escape: backslash before a punctuation character (possibly astral).
+      let n = 0;
+      if (j + 1 < len) {
+        const c1 = src.charCodeAt(j + 1);
+        if (c1 >= 0xd800 && c1 <= 0xdbff && j + 2 < len) {
+          const c2 = src.charCodeAt(j + 2);
+          if (c2 >= 0xdc00 && c2 <= 0xdfff && PUNCT_1.test(src.slice(j + 1, j + 3))) n = 3;
         }
+        if (n === 0 && PUNCT_1.test(src[j + 1])) n = 2;
       }
-      return '[' + 'a'.repeat(match0.length - 2) + ']';
-    };
-    maskedSrc = maskedSrc.replace(reflinkSearchRe, maskReflink);
+      if (n > 0) {
+        if (out === null) out = [];
+        if (j > chunkStart) out.push(src.slice(chunkStart, j));
+        out.push('+'.repeat(n));
+        chunkStart = j + n;
+        NEXT_B.lastIndex = j + n;
+      }
+    } else { // '`'
+      const cap = execAt(CODE_STICKY, src, j);
+      if (cap) {
+        const run = cap[1].length;
+        if (out === null) out = [];
+        if (j > chunkStart) out.push(src.slice(chunkStart, j));
+        out.push(cap[1] + cap[0].slice(run, -run).replace(/`/g, '+') + cap[1]);
+        chunkStart = j + cap[0].length;
+        NEXT_B.lastIndex = j + cap[0].length;
+      } else {
+        // No code span starts here: the whole backtick run is literal.
+        let k = j + 1;
+        while (k < len && src[k] === '`') k++;
+        NEXT_B.lastIndex = k;
+      }
+    }
   }
-  // The escape pass only matches a backslash before punctuation or a code
-  // span (backticks); the block-skip pass only matches a link, a code span
-  // or an html tag. Skip each scan when its trigger characters are absent.
-  if (src.includes('\\') || src.includes('`')) {
-    maskedSrc = maskedSrc.replace(anyPunctOutsideCodeRe, (match0, code, punct) => {
-      if (punct) return '+'.repeat(match0.length);
-      if (code) return code + match0.slice(code.length, -code.length).replace(/`/g, '+') + code;
-      return match0;
-    });
+  if (out === null) return src;
+  if (len > chunkStart) out.push(src.slice(chunkStart, len));
+  return out.join('');
+}
+
+function maskBlockSkip(src) {
+  const len = src.length;
+  let out = null;
+  let chunkStart = 0;
+  NEXT_C.lastIndex = 0;
+  let m;
+  while ((m = NEXT_C.exec(src)) !== null) {
+    const j = m.index;
+    const ch = src[j];
+    if (ch === '[') {
+      const cap = execAt(BS_LINK_STICKY, src, j);
+      if (cap) {
+        if (out === null) out = [];
+        if (j > chunkStart) out.push(src.slice(chunkStart, j));
+        out.push('[' + 'a'.repeat(cap[0].length - 2) + ']');
+        chunkStart = j + cap[0].length;
+        NEXT_C.lastIndex = j + cap[0].length;
+      }
+    } else if (ch === '`') {
+      // A code span must not be preceded by a backtick.
+      if (j > 0 && src[j - 1] === '`') continue;
+      const cap = execAt(CODE_STICKY, src, j);
+      if (cap) {
+        if (out === null) out = [];
+        if (j > chunkStart) out.push(src.slice(chunkStart, j));
+        out.push('[' + 'a'.repeat(cap[0].length - 2) + ']');
+        chunkStart = j + cap[0].length;
+        NEXT_C.lastIndex = j + cap[0].length;
+      } else {
+        // No code span starts here, and the lookbehind blocks the rest
+        // of this backtick run. Skip the run.
+        let k = j + 1;
+        while (k < len && src[k] === '`') k++;
+        NEXT_C.lastIndex = k;
+      }
+    } else { // '<'
+      const cap = execAt(BS_HTML_STICKY, src, j);
+      if (cap) {
+        if (out === null) out = [];
+        if (j > chunkStart) out.push(src.slice(chunkStart, j));
+        out.push('[' + 'a'.repeat(cap[0].length - 2) + ']');
+        chunkStart = j + cap[0].length;
+        NEXT_C.lastIndex = j + cap[0].length;
+      }
+    }
   }
-  if (src.includes('[') || src.includes('`') || src.includes('<')) {
-    maskedSrc = maskedSrc.replace(blockSkipRe, (match0, _link, context) => {
-      const offset = context ? context.length : 0;
-      return match0.slice(0, offset) + '[' + 'a'.repeat(match0.length - offset - 2) + ']';
-    });
-  }
-  return maskedSrc;
+  if (out === null) return src;
+  if (len > chunkStart) out.push(src.slice(chunkStart, len));
+  return out.join('');
+}
+
+function maskSrc(S, src) {
+  return maskBlockSkip(normalizeCodeEscapes(maskReflinks(S, src)));
 }
 
 function outputLink(cap, link, raw, S) {
@@ -1667,3 +1798,4 @@ function renderTokens(S, tokens) {
   }
   return out;
 }
+
