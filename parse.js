@@ -1631,6 +1631,11 @@ function tokenizeInlines(S, src, maskedSrc, tokens) {
       }
     } else if (c === '*' || c === '_') {
       if ((token = tokEmStrong(S, src, maskedSrc, prevChar))) { src = src.substring(token.raw.length); tokens.push(token); continue; }
+      // An email local part may start with '_', so a URL/email can start
+      // here too; marked tries it before falling back to text.
+      if (!S.inLink && urlMayMatch(src)) {
+        if ((token = tokUrl(S, src))) { src = src.substring(token.raw.length); tokens.push(token); continue; }
+      }
     } else if (c === '`') {
       if ((token = tokCodespan(S, src))) { src = src.substring(token.raw.length); tokens.push(token); continue; }
     } else if (c === '~') {
