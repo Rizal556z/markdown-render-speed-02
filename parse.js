@@ -157,6 +157,19 @@ function fenceIndentComp(fenceRaw, body, rules) {
   }).join('\n');
 }
 
+// Column of the first non-space character, counting each tab as 4
+// (marked's `m.replace(/\t/g, "    ").search(/[^ ]/)`), or -1 if none.
+function firstNonSpaceCol(s) {
+  let col = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 9) col += 4;
+    else if (c === 32) col++;
+    else return col;
+  }
+  return -1;
+}
+
 // encodeURI for link/image hrefs, with %25 put back to %.
 function encodeHref(s) {
   try {
@@ -297,11 +310,15 @@ function maskInline(src) {
     };
     t = t.replace(re, sub);
   }
-  t = t.replace(IX_ANY_PUNCT_CODE, (n, s, r) =>
-    r ? '+'.repeat(n.length)
-      : s ? s + n.slice(s.length, -s.length).replace(/`/g, '+') + s
-      : n);
-  t = t.replace(IX_BLOCK_SKIP, (n) => '[' + 'a'.repeat(n.length - 2) + ']');
+  if (t.includes('`') || t.includes('\\')) {
+    t = t.replace(IX_ANY_PUNCT_CODE, (n, s, r) =>
+      r ? '+'.repeat(n.length)
+        : s ? s + n.slice(s.length, -s.length).replace(/`/g, '+') + s
+        : n);
+  }
+  if (t.includes('[') || t.includes('`') || t.includes('<')) {
+    t = t.replace(IX_BLOCK_SKIP, (n) => '[' + 'a'.repeat(n.length - 2) + ']');
+  }
   return t;
 }
 
@@ -486,6 +503,7 @@ function tryEmStrong(src, i, masked, closers, textMode, prevChar) {
     if (v < Q) return null;
     const sub = masked.slice(pos + k);
     const ee = v - Q;
+    if (sub.indexOf(delim) === -1) return null;
     let mm = k, f = 0, s2;
     A.lastIndex = 0;
     while ((s2 = A.exec(sub)) !== null && !(s2.index > ee)) {
@@ -525,6 +543,7 @@ function tryDel(src, i, masked, closers, textMode, prevChar) {
   if (u < d) return null;
   const sub = masked.slice(pos + o);
   const kk = u - d;
+  if (sub.indexOf('~') === -1) return null;
   let p = o, s2;
   IX_DEL_R.lastIndex = 0;
   while ((s2 = IX_DEL_R.exec(sub)) !== null && !(s2.index > kk)) {
@@ -761,24 +780,45 @@ function listTok(src) {
     if (!emptyItem) {
       const vRe = nextBulletRx(R), qRe = hrRx(R), eeRe = fencesBeginRx(R),
         teRe = headingBeginRx(R), mRe = htmlBeginRx(R), neRe = blockquoteBeginRx(R);
+      // Test the block-start regexes on a line, dispatching on its first
+      // non-space character (all six are anchored `^ {0,R}` + trigger).
+      // `prev` selects the set marked tests on the previous line
+      // (fences, heading, HTML, hr — no blockquote or bullet).
+      const startsBlock = (line, prev) => {
+        let sp = 0;
+        while (sp < line.length && line.charCodeAt(sp) === 32) sp++;
+        if (sp > R) return false;
+        const ch = sp < line.length ? line.charCodeAt(sp) : -1;
+        if (ch === 96 || ch === 126) return eeRe.test(line);
+        if (ch === 35) return teRe.test(line);
+        if (ch === 60) return mRe.test(line);
+        if (ch === 62) return !prev && neRe.test(line);
+        if (ch === 45 || ch === 42) return prev ? qRe.test(line) : (vRe.test(line) || qRe.test(line));
+        if (ch === 43 || (ch >= 48 && ch <= 57)) return !prev && vRe.test(line);
+        if (ch === 95) return qRe.test(line);
+        return false;
+      };
       let mLine = mm;
       let yFlag = y;
       while (e) {
-        const U = e.split('\n', 1)[0];
+        const nl = e.indexOf('\n');
+        const U = nl === -1 ? e : e.slice(0, nl);
         f = U;
-        const Z = f.replace(T_LEAD_SPACE_TAB, (v) => expandTabs(v));
-        if (eeRe.test(f) || teRe.test(f) || mRe.test(f) || neRe.test(f) || vRe.test(f) || qRe.test(f)) break;
-        if (Z.search(T_NON_SPACE) >= R || !f.trim()) {
+        if (startsBlock(U)) break;
+        const Z = U.replace(T_LEAD_SPACE_TAB, (v) => expandTabs(v));
+        let zns = 0;
+        while (zns < Z.length && Z.charCodeAt(zns) === 32) zns++;
+        const fBlank = !U.trim();
+        if (zns >= R || fBlank) {
           d += '\n' + Z.slice(R);
         } else {
-          if (yFlag || mLine.replace(T_TAB_GLOBAL, '    ').search(T_NON_SPACE) >= 4 ||
-              eeRe.test(mLine) || teRe.test(mLine) || mRe.test(mLine) || qRe.test(mLine)) break;
-          const qe = /^ {0,3}(?:=+|-+) *$/.test(f) && RX_LHEADING.test(`${mLine}\n${f}`)
-            ? `    ${Z.replace(/^ {0,3}/, '')}` : f;
+          if (yFlag || firstNonSpaceCol(mLine) >= 4 || startsBlock(mLine, true)) break;
+          const qe = /^ {0,3}(?:=+|-+) *$/.test(U) && RX_LHEADING.test(`${mLine}\n${U}`)
+            ? `    ${Z.replace(/^ {0,3}/, '')}` : U;
           d += '\n' + qe;
         }
-        yFlag = !f.trim();
-        e = e.substring(U.length + 1);
+        yFlag = fBlank;
+        e = nl === -1 ? '' : e.substring(nl + 1);
         mLine = Z.slice(R);
       }
     }
@@ -842,6 +882,102 @@ function listTok(src) {
     }
   }
   return list;
+}
+
+// Single-line interrupt tests for the paragraph scan (the same patterns
+// marked's paragraph regex uses in its per-line lookaheads).
+const P_INT_HEADING = /^ {0,3}#{1,6}(?:\s|$)/;
+const P_INT_BQ = /^ {0,3}>/;
+const P_INT_FENCE = /^ {0,3}(?:`{3,}(?=[^`]*$)|~~~)/;
+const P_INT_LIST = /^ {0,3}(?:[*+-]|1[.)])[ \t]+[^ \t]/;
+const P_SETEXT = /^ {0,3}(=+|-+)[ \t]*$/;
+const P_TABLE_DELIM = /^ {0,3}((?:\| *)?:?-+:? *(?:\| *:?-+:? *)*(?:\| *)?)$/;
+const P_BLANK = /^[ \t]*$/;
+const P_TABLE_HEADER = /^ *[^ ]/;
+
+// Scan a paragraph-like block starting at src[0] line by line, returning
+// a table token (header + delimiter on the first two lines), a setext
+// heading token (paragraph lines + an underline), or a paragraph token —
+// the same results marked's table / lheading / paragraph regexes give,
+// without re-scanning the whole remainder for each. When `top` is false
+// (inside a list item) no paragraph token is returned, so the caller
+// falls through to the single-line text token.
+function paraScan(src, top) {
+  const lines = [];
+  const hasNl = [];
+  let p = 0;
+  const line = (k) => {
+    while (lines.length <= k) {
+      if (p >= src.length) return null;
+      const nl = src.indexOf('\n', p);
+      if (nl === -1) { lines.push(src.slice(p)); hasNl.push(false); p = src.length; }
+      else { lines.push(src.slice(p, nl)); hasNl.push(true); p = nl + 1; }
+    }
+    return lines[k];
+  };
+  const l1 = line(1);
+  // Table: header line + delimiter row on the next line.
+  if (l1 !== null && P_TABLE_DELIM.test(l1) && /[:|]/.test(l1)) {
+    const m = RX_TABLE.exec(src);
+    if (m) {
+      const headerCells = splitTableRow(m[1]);
+      const aligns = m[2].replace(T_TABLE_ALIGN_CHARS, '').split('|');
+      if (headerCells.length === aligns.length) {
+        const rowsRaw = m[3] && m[3].trim() ? m[3].replace(T_TABLE_ROW_BLANK, '').split('\n') : [];
+        const raw = stripTrail(m[0], '\n');
+        const align = aligns.map((a) =>
+          T_TABLE_ALIGN_R.test(a) ? 'right'
+            : T_TABLE_ALIGN_C.test(a) ? 'center'
+            : T_TABLE_ALIGN_L.test(a) ? 'left' : null);
+        const header = headerCells.map((c, idx) => ({ text: c, align: align[idx], q: queueInline(c) }));
+        const rows = rowsRaw.map((r) =>
+          splitTableRow(r, header.length).map((c, idx) => ({ text: c, align: align[idx], q: queueInline(c) })));
+        return { tok: { t: 'table', raw, header, align, rows }, len: raw.length };
+      }
+    }
+    // Table regex failed or header/align lengths differ: the paragraph
+    // still stops before line 1 (the table lookahead matched), so fall
+    // into the paragraph scan below.
+  }
+  let end = 1;
+  for (let i = 1; ; i++) {
+    const ln = line(i);
+    // A whitespace-only line ends the paragraph only when a newline
+    // follows it; at end of input it is a paragraph line (cm-241).
+    if (ln === null || (P_BLANK.test(ln) && hasNl[i])) break;
+    if (P_SETEXT.test(ln)) {
+      const m = RX_LHEADING.exec(src);
+      if (m) {
+        const text = m[1].trim();
+        const raw = stripTrail(m[0], '\n');
+        return { tok: { t: 'heading', raw, depth: m[2].charAt(0) === '=' ? 1 : 2, text, q: queueInline(text) }, len: raw.length };
+      }
+      // Not a setext heading after all: the underline is an ordinary line.
+      end = i + 1;
+      continue;
+    }
+    if (RX_HR.test(ln) || P_INT_HEADING.test(ln) || P_INT_BQ.test(ln) || P_INT_FENCE.test(ln) ||
+        P_INT_LIST.test(ln) || htmlBeginRx(4).test(ln)) break;
+    const nx = line(i + 1);
+    if (nx !== null && P_TABLE_HEADER.test(ln) && P_TABLE_DELIM.test(nx)) {
+      // A table interrupts the paragraph — unless the delimiter line is
+      // itself a setext underline, in which case the whole block is a
+      // setext heading (cm-095).
+      if (P_SETEXT.test(nx)) {
+        const m = RX_LHEADING.exec(src);
+        if (m) {
+          const text = m[1].trim();
+          const raw = stripTrail(m[0], '\n');
+          return { tok: { t: 'heading', raw, depth: m[2].charAt(0) === '=' ? 1 : 2, text, q: queueInline(text) }, len: raw.length };
+        }
+      }
+      break;
+    }
+    end = i + 1;
+  }
+  if (!top) return null;
+  const text = lines.slice(0, end).join('\n');
+  return { tok: { t: 'paragraph', raw: text, text, q: queueInline(text) }, len: text.length };
 }
 
 // Lex blocks of `src` into `toks` (appended). `nested` is true when called
@@ -956,53 +1092,25 @@ function lexBlocks(src, toks, nested) {
       }
       // not a valid definition: fall through to table / setext / paragraph
     }
-    // table
-    m = RX_TABLE.exec(src);
-    if (m && T_TABLE_DELIM.test(m[2])) {
-      const headerCells = splitTableRow(m[1]);
-      const aligns = m[2].replace(T_TABLE_ALIGN_CHARS, '').split('|');
-      if (headerCells.length === aligns.length) {
-        const rowsRaw = m[3] && m[3].trim() ? m[3].replace(T_TABLE_ROW_BLANK, '').split('\n') : [];
-        const raw = stripTrail(m[0], '\n');
-        src = src.substring(raw.length);
-        const align = aligns.map((a) =>
-          T_TABLE_ALIGN_R.test(a) ? 'right'
-            : T_TABLE_ALIGN_C.test(a) ? 'center'
-            : T_TABLE_ALIGN_L.test(a) ? 'left' : null);
-        const header = headerCells.map((c, idx) => ({ text: c, align: align[idx], q: queueInline(c) }));
-        const rows = rowsRaw.map((r) =>
-          splitTableRow(r, header.length).map((c, idx) => ({ text: c, align: align[idx], q: queueInline(c) })));
-        toks.push({ t: 'table', raw, header, align, rows });
-        continue;
-      }
-      // header/align length mismatch: not a table, fall through
-    }
-    // setext heading
-    m = RX_LHEADING.exec(src);
-    if (m) {
-      const text = m[1].trim();
-      const raw = stripTrail(m[0], '\n');
-      src = src.substring(raw.length);
-      toks.push({ t: 'heading', raw, depth: m[2].charAt(0) === '=' ? 1 : 2, text, q: queueInline(text) });
-      continue;
-    }
-    // paragraph (top level only)
-    if (TOP) {
-      m = RX_PARAGRAPH.exec(src);
-      if (m) {
-        const text = m[1].charAt(m[1].length - 1) === '\n' ? m[1].slice(0, -1) : m[1];
-        const tok = { t: 'paragraph', raw: m[0], text, q: queueInline(text) };
-        src = src.substring(m[0].length);
-        const prev = toks.at(-1);
-        if (nested && prev && prev.t === 'paragraph') {
-          prev.raw += (prev.raw.endsWith('\n') ? '' : '\n') + tok.raw;
-          prev.text += '\n' + tok.text;
-          QUEUE.pop();
-          QUEUE.at(-1).src = prev.text;
+    // table / setext heading / paragraph (manual line scan)
+    {
+      const sc = paraScan(src, TOP);
+      if (sc) {
+        src = src.substring(sc.len);
+        if (sc.tok.t === 'paragraph') {
+          const prev = toks.at(-1);
+          if (nested && prev && prev.t === 'paragraph') {
+            prev.raw += (prev.raw.endsWith('\n') ? '' : '\n') + sc.tok.raw;
+            prev.text += '\n' + sc.tok.text;
+            QUEUE.pop();
+            QUEUE.at(-1).src = prev.text;
+          } else {
+            toks.push(sc.tok);
+          }
+          nested = false;
         } else {
-          toks.push(tok);
+          toks.push(sc.tok);
         }
-        nested = false;
         continue;
       }
     }
