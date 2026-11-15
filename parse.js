@@ -786,12 +786,13 @@ function tokList(S, src, pos) {
           : nextLine2;
         let nwLead = 0;
         while (nwLead < nextLineWithoutTabs.length && nextLineWithoutTabs[nwLead] === ' ') nwLead++;
-        if (nwLead >= indent || !nextLine2.trim()) { // Dedent if possible
+        const isBlankLine = nwLead === nextLineWithoutTabs.length;
+        if (nwLead >= indent || isBlankLine) { // Dedent if possible
           itemContents += '\n' + nextLineWithoutTabs.slice(indent);
         } else {
           // not enough indentation
           if (blankLine) break;
-          if (line.replace(TAB_GLOBAL, '    ').search(NON_SPACE) >= 4) break; // indented code block
+          if ((line.includes('\t') ? line.replace(TAB_GLOBAL, '    ') : line).search(NON_SPACE) >= 4) break; // indented code block
           if (fencesBeginRegex.test(line)) break;
           if (headingBeginRegex.test(line)) break;
           if (htmlBeginRegex.test(line)) break;
@@ -803,7 +804,7 @@ function tokList(S, src, pos) {
             : nextLine2;
           itemContents += '\n' + continuation;
         }
-        blankLine = !nextLine2.trim();
+        blankLine = isBlankLine;
         p = nl === -1 ? listSrc.length : nl + 1;
         line = nextLineWithoutTabs.slice(indent);
       }
@@ -1087,7 +1088,7 @@ function linkInText(S, text) {
 // delimiters inside them. Every mask keeps the length it replaces.
 function maskSrc(S, src) {
   let maskedSrc = src;
-  if (src.includes('[')) {
+  if (src.includes('[') && src.includes(']')) {
     const maskReflink = (match0) => {
       const refStart = match0.lastIndexOf('[');
       if (!Object.hasOwn(S.links, normalizeLabel(match0.slice(refStart + 1, -1)))) return match0;
@@ -1240,14 +1241,25 @@ function tokEmStrong(S, src, maskedSrc, prevChar = '') {
   const srcStart = maskedSrc.length - src.length;
   let runStart = srcStart;
   while (runStart > 0 && maskedSrc[runStart - 1] === delimChar) runStart--;
-  const runPrevChar = [...maskedSrc.slice(Math.max(0, runStart - 2), runStart)].at(-1) ?? '';
+  // The last code point before the run (a surrogate pair counts as one).
+  let runPrevChar = '';
+  if (runStart > 0) {
+    const c1 = maskedSrc.charCodeAt(runStart - 1);
+    if (c1 >= 0xdc00 && c1 <= 0xdfff && runStart >= 2) {
+      const c0 = maskedSrc.charCodeAt(runStart - 2);
+      runPrevChar = (c0 >= 0xd800 && c0 <= 0xdbff) ? maskedSrc.slice(runStart - 2, runStart) : maskedSrc[runStart - 1];
+    } else runPrevChar = maskedSrc[runStart - 1];
+  }
   const runPrevPunct = runPrevChar === '*' || runPrevChar === '_' || !!punctuationRe.exec(runPrevChar);
   if (runStart < srcStart) prevChar = runPrevChar;
   const prevPunct = runStart < srcStart ? runPrevPunct : !!punctuationRe.exec(prevChar);
   if (match[4] && prevChar.match(UNICODE_ALNUM)) return undefined;
   const nextChar = match[1] || match[3] || '';
   if (!nextChar || !prevChar || prevPunct) {
-    const lLength = [...match[0]].length - 1;
+    // The delimiter run is the leading run of delimChar in the match (the
+    // character after it is never a delimiter by the regex's construction).
+    let lLength = 0;
+    while (lLength < match[0].length && match[0][lLength] === delimChar) lLength++;
     let rDelim, rLength, delimTotal = lLength, midDelimTotal = 0;
     const runLength = srcStart - runStart + lLength;
     const openerCanClose = !!runPrevChar.trim()
@@ -1264,7 +1276,7 @@ function tokEmStrong(S, src, maskedSrc, prevChar = '') {
       if (match.index > lastPossibleInWindow) break;
       rDelim = match[1] || match[2] || match[3] || match[4] || match[5] || match[6];
       if (!rDelim) continue;
-      rLength = [...rDelim].length;
+      rLength = rDelim.length; // a run of '*' or '_' only
       if (match[3] || match[4]) {
         delimTotal += rLength;
         continue;
@@ -1278,7 +1290,8 @@ function tokEmStrong(S, src, maskedSrc, prevChar = '') {
       delimTotal -= rLength;
       if (delimTotal > 0) continue;
       rLength = Math.min(rLength, rLength + delimTotal + midDelimTotal);
-      const lastCharLength = [...match[0]][0].length;
+      // Length in UTF-16 units of the match's first code point (1 or 2).
+      const lastCharLength = match[0].codePointAt(0) > 0xffff ? 2 : 1;
       const raw = src.slice(0, lLength + match.index + lastCharLength + rLength);
       if (Math.min(lLength, rLength) % 2) {
         const text = raw.slice(1, -1);
@@ -1312,7 +1325,9 @@ function tokDel(S, src, maskedSrc, prevChar = '') {
   if (!match) return undefined;
   const nextChar = match[1] || '';
   if (!nextChar || !prevChar || punctuationRe.exec(prevChar)) {
-    const lLength = [...match[0]].length - 1;
+    // The delimiter run is the leading run of '~' in the match.
+    let lLength = 0;
+    while (lLength < match[0].length && match[0][lLength] === '~') lLength++;
     let rDelim, rLength, delimTotal = lLength;
     const endReg = delRDelimRe;
     const lastPossible = lastDelCloser(S, maskedSrc);
@@ -1325,7 +1340,7 @@ function tokDel(S, src, maskedSrc, prevChar = '') {
       if (match.index > lastPossibleInWindow) break;
       rDelim = match[1] || match[2] || match[3] || match[4] || match[5] || match[6];
       if (!rDelim) continue;
-      rLength = [...rDelim].length;
+      rLength = rDelim.length; // a run of '~' only
       if (rLength !== lLength) continue;
       if (match[3] || match[4]) {
         delimTotal += rLength;
@@ -1334,7 +1349,7 @@ function tokDel(S, src, maskedSrc, prevChar = '') {
       delimTotal -= rLength;
       if (delimTotal > 0) continue;
       rLength = Math.min(rLength, rLength + delimTotal);
-      const lastCharLength = [...match[0]][0].length;
+      const lastCharLength = match[0].codePointAt(0) > 0xffff ? 2 : 1;
       const raw = src.slice(0, lLength + match.index + lastCharLength + rLength);
       const text = raw.slice(lLength, -lLength);
       return { type: 'del', raw, text, tokens: inlineTokens(S, text, []) };
@@ -1404,7 +1419,9 @@ function inlineTokensInner(S, src, tokens) {
   // text token. Nothing here can open a link, emphasis, code span, tag,
   // entity or hard break, and with inRawBlock off the text is escaped.
   if (!S.inRawBlock && src.length > 0 && isPlainInline(src)) {
-    tokens.push({ type: 'text', raw: src, text: src, escaped: false });
+    // No escapable characters ('>' '"' "'") means the text is already what
+    // the renderer would output, so it is marked escaped to skip re-scanning.
+    tokens.push({ type: 'text', raw: src, text: src, escaped: !/[>"']/.test(src) });
     return tokens;
   }
   const maskedSrc = src.includes('*') || src.includes('_') || src.includes('~')
