@@ -157,6 +157,28 @@ function fenceIndentComp(fenceRaw, body, rules) {
   }).join('\n');
 }
 
+// Code-point length of a string (fast path when it has no astral chars).
+const RX_ASTRAL = /[\uD800-\uDBFF]/;
+function cpLen(s) {
+  return RX_ASTRAL.test(s) ? [...s].length : s.length;
+}
+
+// UTF-16 length of the first code point of s (1, or 2 for astral).
+function firstCpLen(s) {
+  return s.codePointAt(0) > 0xFFFF ? 2 : 1;
+}
+
+// Last code point of s (1 or 2 UTF-16 units), or ''.
+function lastCp(s) {
+  if (!s) return '';
+  const c = s.charCodeAt(s.length - 1);
+  if (c >= 0xDC00 && c <= 0xDFFF && s.length >= 2) {
+    const p = s.charCodeAt(s.length - 2);
+    if (p >= 0xD800 && p <= 0xDBFF) return s.slice(-2);
+  }
+  return s.slice(-1);
+}
+
 // Column of the first non-space character, counting each tab as 4
 // (marked's `m.replace(/\t/g, "    ").search(/[^ ]/)`), or -1 if none.
 function firstNonSpaceCol(s) {
@@ -485,7 +507,7 @@ function tryEmStrong(src, i, masked, closers, textMode, prevChar) {
   const pos = i;
   let l = pos;
   while (l > 0 && masked[l - 1] === delim) l--;
-  const p = [...masked.slice(Math.max(0, l - 2), l)].at(-1) ?? '';
+  const p = lastCp(masked.slice(Math.max(0, l - 2), l));
   const h = p === '*' || p === '_' || !!IX_PUNCT.exec(p);
   let n = prevChar;
   if (l < pos) n = p;
@@ -493,7 +515,7 @@ function tryEmStrong(src, i, masked, closers, textMode, prevChar) {
   if (m[4] && T_UNICODE_ALNUM.test(n)) return null;
   const d = m[1] || m[3] || '';
   if (!d || !n || u) {
-    const k = [...m[0]].length - 1;
+    const k = cpLen(m[0]) - 1;
     const y = pos - l + k;
     const R = !!p.trim() && (!!d || (delim === '*' && !h));
     if (delim !== '*' && delim !== '_') return null;
@@ -509,7 +531,7 @@ function tryEmStrong(src, i, masked, closers, textMode, prevChar) {
     while ((s2 = A.exec(sub)) !== null && !(s2.index > ee)) {
       const g = s2[1] || s2[2] || s2[3] || s2[4] || s2[5] || s2[6];
       if (!g) continue;
-      const b = [...g].length;
+      const b = g.length;
       if (s2[3] || s2[4]) { mm += b; continue; }
       if (s2[5] || s2[6] || R) {
         if (openLeft && (s2[5] || s2[6])) break;
@@ -518,7 +540,7 @@ function tryEmStrong(src, i, masked, closers, textMode, prevChar) {
       mm -= b;
       if (mm > 0) continue;
       const bb = Math.min(b, b + mm + f);
-      const te = [...s2[0]][0].length;
+      const te = firstCpLen(s2[0]);
       const M = src.slice(i, i + k + s2.index + te + bb);
       if (Math.min(k, bb) % 2) {
         const inner = M.slice(1, -1);
@@ -536,7 +558,7 @@ function tryDel(src, i, masked, closers, textMode, prevChar) {
   const m = IX_DEL_L.exec(src.slice(i));
   if (!m) return null;
   if (!((m[1] || '') === '' || !prevChar || IX_PUNCT.exec(prevChar))) return null;
-  const o = [...m[0]].length - 1;
+  const o = cpLen(m[0]) - 1;
   const pos = i;
   const u = closers.del;
   const d = pos + o;
@@ -549,13 +571,13 @@ function tryDel(src, i, masked, closers, textMode, prevChar) {
   while ((s2 = IX_DEL_R.exec(sub)) !== null && !(s2.index > kk)) {
     const g = s2[1] || s2[2] || s2[3] || s2[4] || s2[5] || s2[6];
     if (!g) continue;
-    const l = [...g].length;
+    const l = g.length;
     if (l !== o) continue;
     if (s2[3] || s2[4]) { p += l; continue; }
     p -= l;
     if (p > 0) continue;
     const ll = Math.min(l, l + p);
-    const te = [...s2[0]][0].length;
+    const te = firstCpLen(s2[0]);
     const raw = src.slice(i, i + o + s2.index + te + ll);
     const inner = raw.slice(o, -o);
     return { html: textMode ? renderInline(inner, true) : '<del>' + renderInline(inner, false) + '</del>', len: raw.length };
@@ -952,9 +974,11 @@ function paraScan(src, top) {
         const raw = stripTrail(m[0], '\n');
         return { tok: { t: 'heading', raw, depth: m[2].charAt(0) === '=' ? 1 : 2, text, q: queueInline(text) }, len: raw.length };
       }
-      // Not a setext heading after all: the underline is an ordinary line.
-      end = i + 1;
-      continue;
+      // Not a setext heading: the underline is an ordinary line — except
+      // that `---` is also a thematic break, which still interrupts the
+      // paragraph (marked's lheading regex refuses lines that look like an
+      // HTML block start, e.g. `<http://x>` followed by `---`).
+      // Fall through to the interrupt tests below.
     }
     if (RX_HR.test(ln) || P_INT_HEADING.test(ln) || P_INT_BQ.test(ln) || P_INT_FENCE.test(ln) ||
         P_INT_LIST.test(ln) || htmlBeginRx(4).test(ln)) break;
