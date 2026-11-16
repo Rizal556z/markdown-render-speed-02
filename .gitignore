@@ -1,0 +1,5 @@
+# make.fun submission records (claim codes) — never commit.
+submission.md
+# Local tooling / OS noise.
+node_modules/
+.DS_Store
